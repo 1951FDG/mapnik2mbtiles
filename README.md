@@ -1,5 +1,7 @@
 # Converts a Mapnik XML file into an MBTiles file
 
+This is used to generate web maps.
+
 ## Table of Contents
 
 -   [Installation](#installation)
@@ -13,7 +15,7 @@
 
 ## Installation
 
-1.  For macOS with Python 3.7 (credit: [1951FDG](https://github.com/1951FDG))
+1.  For macOS with Python 3.7
 
 ```bash
 # MBUtil dependency
