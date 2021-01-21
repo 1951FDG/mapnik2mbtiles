@@ -4,6 +4,9 @@ This is used to generate web maps.
 
 ## Table of Contents
 
+<details>
+<summary>"Click to expand"</summary>
+
 -   [Installation](#installation)
 -   [Usage](#usage)
 -   [Feedback](#feedback)
@@ -12,6 +15,8 @@ This is used to generate web maps.
 -   [Built with](#built-with)
 -   [Attributions](#attributions)
 -   [Acknowledgments](#acknowledgments)
+
+</details>
 
 ## Installation
 
