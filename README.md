@@ -1,51 +1,57 @@
-# Converts a Mapnik XML file into an MBTiles file
+# mapnik2mbtiles
 
-This is used to generate web maps.
+Converts a Mapnik XML file into an MBTiles file.
+
+This is used to generate tile overlays for maps, e.g. Google Maps for Android apps.
 
 ## Table of Contents
 
 <details>
 <summary>"Click to expand"</summary>
 
--   [Installation](#installation)
--   [Usage](#usage)
--   [Feedback](#feedback)
--   [Documentation](#documentation)
--   [Credits](#credits)
--   [Built with](#built-with)
--   [Attributions](#attributions)
--   [Acknowledgments](#acknowledgments)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Feedback](#feedback)
+- [Documentation](#documentation)
+- [Credits](#credits)
+- [Built with](#built-with)
+- [Attributions](#attributions)
+- [Acknowledgments](#acknowledgments)
 
 </details>
 
 ## Installation
 
-1.  For macOS with Python 3.7
+### macOS - Python 3.9
 
-```bash
-# MBUtil dependency
-git clone git://github.com/mapbox/mbutil.git
-cd mbutil
-python3 setup.py install
-```
-
-```bash
+```sh
 # Common dependencies
-xcode-select --install
-/usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
-echo 'export PATH="/usr/local/sbin:$PATH"' >> ~/.bash_profile
-brew install boost-python3 gnu-sed mapnik py3cairo python3
+brew install gnu-sed mapnik boost-python3 py3cairo
 ```
 
-```bash
+```sh
 # Python bindings for Mapnik
 git clone --branch v3.0.x git@github.com:mapnik/python-mapnik.git
 cd python-mapnik
 gsed -i 's~{0}/include/pycairo~/usr/local/include/pycairo~g' setup.py
-BOOST_PYTHON_LIB=boost_python37 PYCAIRO=true python3 setup.py install
+BOOST_PYTHON_LIB=boost_python39 PYCAIRO=true pip3 install .
+```
+
+```sh
+# MBUtil dependency
+git clone git://github.com/mapbox/mbutil.git
+cd mbutil
+pip3 install .
 ```
 
 ## Usage
+
+```sh
+output=$project/app/src/main/assets/world.mbtiles
+rm -i "$output"
+cd mapnik2mbtiles
+python3 generate_tiles_multiprocess.py mapfile.xml "$output" 4 4 --format webp
+```
 
 ```console
 generate_tiles_multiprocess.py --help
@@ -60,7 +66,7 @@ positional arguments:
 optional arguments:
   -h, --help        show this help message and exit
   --bbox f f f f    bounding box that will be rendered
-  --cores CORES     # of rendering threads to spawn
+  --threads THREADS # of rendering threads to spawn
   --name NAME       name for each renderer
   --size SIZE       resolution of the tile image
   --format FORMAT   format of the image tiles
@@ -78,26 +84,26 @@ Feel free to send us feedback by submitting an [issue](https://github.com/1951FD
 
 ## Documentation
 
--   <https://github.com/mapnik/mapnik/wiki/aspect-fix-mode>
--   <https://github.com/mapnik/mapnik/wiki/image-io>
--   <https://github.com/mapnik/mapnik/wiki/mapnikrenderers>
--   <https://maptiler.com/google-maps-coordinates-tile-bounds-projection/>
--   <https://wiki.openstreetmap.org/wiki/slippy_map_tilenames>
--   <https://wiki.openstreetmap.org/wiki/zoom_levels>
+- <https://github.com/mapnik/mapnik/wiki/aspect-fix-mode>
+- <https://github.com/mapnik/mapnik/wiki/image-io>
+- <https://github.com/mapnik/mapnik/wiki/mapnikrenderers>
+- <https://maptiler.com/google-maps-coordinates-tile-bounds-projection/>
+- <https://wiki.openstreetmap.org/wiki/slippy_map_tilenames>
+- <https://wiki.openstreetmap.org/wiki/zoom_levels>
 
 ## Credits
 
--   [Old XML format Mapnik stylesheets](https://github.com/openstreetmap/mapnik-stylesheets)
-    -   Modified [generate_tiles_multiprocess.py](generate_tiles_multiprocess.py)
+- [Old XML format Mapnik stylesheets](https://github.com/openstreetmap/mapnik-stylesheets)
+    - Modified [generate_tiles_multiprocess.py](generate_tiles_multiprocess.py)
 
 ## Built with
 
--   [TileMill](https://tilemill.s3.amazonaws.com/dev/TileMill-v0.10.1-291-g31027ed.zip) - Exporter of Mapnik XML files
+- [TileMill](http://tilemill.s3.amazonaws.com/latest/TileMill-0.10.2.zip)
 
 ## Attributions
 
--   [Natural Earth Map Data](https://www.naturalearthdata.com/downloads/10m-physical-vectors/)
+- [Natural Earth Map Data](https://www.naturalearthdata.com/downloads/10m-physical-vectors/)
 
 ## Acknowledgments
 
-Special thanks to [MapBox](https://github.com/mapbox) for the MBTiles file format.
+Special thanks to [MapBox](https://github.com/mapbox) for the [MBTiles](https://github.com/mapbox/mbtiles-spec/blob/master/1.3/spec.md) file format.
