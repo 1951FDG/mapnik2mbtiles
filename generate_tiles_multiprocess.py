@@ -1,24 +1,23 @@
-#!/usr/bin/env python
-# pylint: disable=C0111,C0301
+# pylint: disable=W0707
 
 import json
 import logging
+import math
 import os
-import sys
 import shutil
+import sys
 import threading
 from argparse import ArgumentParser
-from math import atan, exp, log, pi, sin
 from queue import Queue
 
 import mapnik
 from mbutil import disk_to_mbtiles
 
+DEG_TO_RAD = math.pi / 180
+RAD_TO_DEG = 180 / math.pi
 
-def minmax(a, b, c):
-    a = max(a, b)
-    a = min(a, c)
-    return a
+EARTH_RADIUS = 6378137.0
+MERC_MAX_LATITUDE = 85.0511287798065923778
 
 
 class GoogleProjection:
@@ -31,7 +30,7 @@ class GoogleProjection:
         for _ in range(0, levels):
             e = c / 2
             self.Bc.append(c / 360.0)
-            self.Cc.append(c / (2 * pi))
+            self.Cc.append(c / (2 * math.pi))
             self.zc.append((e, e))
             self.Ac.append(c)
             c *= 2
@@ -39,16 +38,30 @@ class GoogleProjection:
     def from_ll_to_pixel(self, ll, zoom):
         d = self.zc[zoom]
         e = round(d[0] + ll[0] * self.Bc[zoom])
-        f = minmax(sin(pi / 180 * ll[1]), -0.9999, 0.9999)
-        g = round(d[1] + 0.5 * log((1 + f) / (1 - f)) * -self.Cc[zoom])
+        f = min(max(math.sin(DEG_TO_RAD * ll[1]), -0.9999), 0.9999)
+        g = round(d[1] + 0.5 * math.log((1 + f) / (1 - f)) * -self.Cc[zoom])
         return e, g
 
     def from_pixel_to_ll(self, px, zoom):
         e = self.zc[zoom]
         f = (px[0] - e[0]) / self.Bc[zoom]
         g = (px[1] - e[1]) / -self.Cc[zoom]
-        h = 180 / pi * (2 * atan(exp(g)) - 0.5 * pi)
+        h = RAD_TO_DEG * (2 * math.atan(math.exp(g)) - 0.5 * math.pi)
         return f, h
+
+    def lonlat2merc(self, x, y):
+        dx = min(max(-180.0, x), 180.0)
+        dy = min(max(-MERC_MAX_LATITUDE, y), MERC_MAX_LATITUDE)
+        x = EARTH_RADIUS * math.radians(dx)
+        y = EARTH_RADIUS * math.log(math.tan(math.radians(90 + dy) / 2))
+        return x, y
+
+    def merc2lonlat(self, x, y):
+        rx = min(max(-math.pi, x / EARTH_RADIUS), math.pi)
+        ry = min(max(-math.pi, y / EARTH_RADIUS), math.pi)
+        x = math.degrees(rx)
+        y = math.degrees(2 * math.atan(math.exp(ry)) - math.pi / 2)
+        return x, y
 
 
 class RenderThread:
@@ -59,8 +72,6 @@ class RenderThread:
         self.m.aspect_fix_mode = mapnik.aspect_fix_mode.RESPECT
         # Load style XML
         mapnik.load_map(self.m, map_file, True)
-        # Obtain <Map> projection
-        self.prj = mapnik.Projection(self.m.srs)
         # Projects between tile pixel co-ordinates and LatLong (EPSG:4326)
         self.tileproj = GoogleProjection(max_zoom + 1, tile_size)
         self.tilesize = tile_size
@@ -73,12 +84,15 @@ class RenderThread:
         # Convert to LatLong (EPSG:4326)
         l0 = self.tileproj.from_pixel_to_ll(p0, z)
         l1 = self.tileproj.from_pixel_to_ll(p1, z)
+
         # Convert to map projection (e.g. mercator coordinate system EPSG:900913)
-        c0 = self.prj.forward(mapnik.Coord(l0[0], l0[1]))
-        c1 = self.prj.forward(mapnik.Coord(l1[0], l1[1]))
+        # l0 = self.tileproj.lonlat2merc(l0[0], l0[1])
+        # l1 = self.tileproj.lonlat2merc(l1[0], l1[1])
+
+        c0 = mapnik.Coord(l0[0], l0[1])
+        c1 = mapnik.Coord(l1[0], l1[1])
         # Bounding box for the tile
         bbox = mapnik.Box2d(c0.x, c0.y, c1.x, c1.y)
-        self.m.resize(self.tilesize, self.tilesize)
         self.m.zoom_to_box(bbox)
         if self.m.buffer_size < 128:
             self.m.buffer_size = 128
@@ -86,12 +100,12 @@ class RenderThread:
         im = mapnik.Image(self.tilesize, self.tilesize)
         mapnik.render(self.m, im)
 
-        if self.tileformat == "jpg":
-            im.save(tile_uri, "jpeg100")
-        if self.tileformat == "png":
-            im.save(tile_uri, "png256:z=9:t=0:m=h:s=filtered")
         if self.tileformat == "webp":
-            im.save(tile_uri, "webp:lossless=1:quality=100:method=4:image_hint=3")
+            im.save(tile_uri, "webp:lossless=1:quality=100:image_hint=3")
+        elif self.tileformat == "jpg":
+            im.save(tile_uri, "jpeg100")
+        else:
+            im.save(tile_uri, self.tileformat + ":z=9:s=rle")
 
     def loop(self):
         while True:
@@ -100,8 +114,8 @@ class RenderThread:
             if r is None:
                 self.q.task_done()
                 break
-            else:
-                (name, tile_uri, x, y, z) = r
+
+            (name, tile_uri, x, y, z) = r
 
             exists = ""
             if os.path.isfile(tile_uri):
@@ -120,12 +134,22 @@ class RenderThread:
             self.q.task_done()
 
 
-def render_tiles(bbox, map_file, min_zoom, max_zoom, threads, name, tile_dir, tile_size, tile_format, mbtiles_path):  # noqa: C901
-    logger.info("render_tiles(%s, %s, %s, %s, %s, %s, %s, %s, %s)", bbox,
-                map_file, tile_dir, min_zoom, max_zoom, threads, name, tile_size,
-                mbtiles_path)
+def render_tiles(map_file, bbox, min_zoom, max_zoom, threads, name, tile_size, tile_format, tile_dir, tile_ext):
+    logger.info(
+        "render_tiles(%s, %s, %s, %s, %s, %s, %s, %s, %s %s)",
+        map_file,
+        bbox,
+        min_zoom,
+        max_zoom,
+        threads,
+        name,
+        tile_size,
+        tile_format,
+        tile_dir,
+        tile_ext,
+    )
     # Launch rendering threads
-    queue = Queue(32)
+    queue = Queue(-1)
     renderers = {}
     for i in range(threads):
         renderer = RenderThread(queue, map_file, max_zoom, tile_size, tile_format)
@@ -158,15 +182,13 @@ def render_tiles(bbox, map_file, min_zoom, max_zoom, threads, name, tile_dir, ti
             if not os.path.isdir(os.path.join(tile_dir, str_z, str_x)):
                 os.mkdir(os.path.join(tile_dir, str_z, str_x))
 
-            for y in range(
-                    int(px1[1] / tile_sizef),
-                    int(px0[1] / tile_sizef) + 1):
+            for y in range(int(px0[1] / tile_sizef), int(px1[1] / tile_sizef) + 1):
                 # Validate y co-ordinate
                 if (y < 0) or (y >= 2 ** z):
                     continue
                 # Submit tile to be rendered into the queue
                 str_y = "%s" % y
-                tile_uri = os.path.join(tile_dir, str_z, str_x, str_y + "." + tile_format)
+                tile_uri = os.path.join(tile_dir, str_z, str_x, str_y + "." + tile_ext)
                 t = (name, tile_uri, x, y, z)
                 try:
                     queue.put(t)
@@ -180,38 +202,22 @@ def render_tiles(bbox, map_file, min_zoom, max_zoom, threads, name, tile_dir, ti
     queue.join()
     for i in range(threads):
         renderers[i].join()
-    # Import `tiles` directory into a `MBTiles` file
-    if mbtiles_path:
-        if os.path.isfile(mbtiles_path):
-            # `MBTiles` file must not already exist
-            sys.stderr.write("Importing tiles into already-existing MBTiles is not yet supported\n")
-            sys.exit(1)
-        else:
-            data = {}
-            # data["bounds"] = str(bbox[0]) + ", " + str(bbox[1]) + ", " + str(bbox[2]) + ", " + str(bbox[3])
-            data["maxzoom"] = str(max_zoom)
-            data["minzoom"] = str(min_zoom)
-            # data["version"] = "1.0"
-            with open(os.path.join(tile_dir, "metadata.json"), "w") as outfile:
-                json.dump(data, outfile, sort_keys=True, indent=4)
-
-            disk_to_mbtiles(tile_dir, mbtiles_path, **args.__dict__)
 
 
 if __name__ == "__main__":
     parser = ArgumentParser(
         usage="%(prog)s [options] input output 1..18 1..18",
-        allow_abbrev=False
+        allow_abbrev=False,
     )
     # Positional arguments
     parser.add_argument(
         "input",
-        help="mapnik XML file"
+        help="mapnik XML file",
     )
     parser.add_argument(
         "output",
         help="a MBTiles file",
-        default=None
+        default=None,
     )
     parser.add_argument(
         "min",
@@ -219,7 +225,7 @@ if __name__ == "__main__":
         type=int,
         metavar="1..18",
         choices=range(1, 18),
-        default="1"
+        default="1",
     )
     parser.add_argument(
         "max",
@@ -227,7 +233,7 @@ if __name__ == "__main__":
         type=int,
         metavar="1..18",
         choices=range(1, 18),
-        default="18"
+        default="18",
     )
     # Optional arguments
     parser.add_argument(
@@ -236,18 +242,17 @@ if __name__ == "__main__":
         nargs=4,
         type=float,
         metavar="f",
-        default=[-20037508.342789244, -20037508.342789244, 20037508.342789244, 20037508.342789244]
     )
     parser.add_argument(
-        "--cores",
+        "--threads",
         help="# of rendering threads to spawn",
         type=int,
-        default=4
+        default=8,
     )
     parser.add_argument(
         "--name",
         help="name for each renderer",
-        default="unknown"
+        default="unknown",
     )
     parser.add_argument(
         "--size",
@@ -255,7 +260,7 @@ if __name__ == "__main__":
         type=int,
         metavar="SIZE",
         choices=[1024, 512, 256],
-        default=512
+        default=512,
     )
     # MBUtil arguments
     parser.add_argument(
@@ -264,8 +269,8 @@ if __name__ == "__main__":
         dest="format",
         type=str,
         metavar="FORMAT",
-        choices=["jpg", "png", "webp"],
-        default="png"
+        choices=["jpg", "png", "png8", "png24", "png32", "png256", "webp"],
+        default="png",
     )
     parser.add_argument(
         "--scheme",
@@ -273,21 +278,21 @@ if __name__ == "__main__":
         dest="scheme",
         type=str,
         metavar="SCHEME",
-        choices=["xyz"],
-        default="xyz"
+        choices=["xyz", "tms"],
+        default="tms",
     )
     parser.add_argument(
         "--no_compression",
         help="disable MBTiles compression",
         dest="compression",
         action="store_false",
-        default=True
+        default=True,
     )
     parser.add_argument(
         "--verbose",
         dest="silent",
         action="store_false",
-        default=True
+        default=True,
     )
 
     args = parser.parse_args()
@@ -297,19 +302,47 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     base_dir = os.path.dirname(args.input)
     tiles_dir = os.path.join(base_dir, "tiles")
+    tiles_ext = "png" if args.format.startswith("png") else args.format
+    mbtiles_path = args.output
 
     if os.path.exists(tiles_dir) and os.path.isdir(tiles_dir):
         shutil.rmtree(tiles_dir)
 
+    if not args.bbox:
+        args.bbox = [-180, -MERC_MAX_LATITUDE, 180, MERC_MAX_LATITUDE]
+    else:
+        args.bbox[0] = min(max(-180.0, args.bbox[0]), 180.0)
+        args.bbox[1] = min(max(-MERC_MAX_LATITUDE, args.bbox[1]), MERC_MAX_LATITUDE)
+        args.bbox[2] = min(max(-180.0, args.bbox[2]), 180.0)
+        args.bbox[3] = min(max(-MERC_MAX_LATITUDE, args.bbox[3]), MERC_MAX_LATITUDE)
+
     render_tiles(
-        args.bbox,
-        args.input,
-        args.min,
-        args.max,
-        args.cores,
-        args.name,
-        tiles_dir,
-        args.size,
-        args.format,
-        args.output
+        args.input, args.bbox, args.min, args.max, args.threads, args.name, args.size, args.format, tiles_dir, tiles_ext
     )
+
+    # Import `tiles` directory into a `MBTiles` file
+    if mbtiles_path:
+        if os.path.isfile(mbtiles_path):
+            # `MBTiles` file must not already exist
+            sys.stderr.write("Importing tiles into already-existing MBTiles is not yet supported\n")
+            sys.exit(1)
+
+        metadata = {
+            "name": os.path.splitext(os.path.basename(mbtiles_path))[0],
+            "format": tiles_ext,
+            "bounds": str(args.bbox[0]) + ", " + str(args.bbox[1]) + ", " + str(args.bbox[2]) + ", " + str(args.bbox[3]),
+            "minzoom": str(args.min),
+            "maxzoom": str(args.max),
+            "attribution": "",
+            "description": "",
+            "type": "",
+            "version": "",
+        }
+
+        metadata = {k: v for k, v in metadata.items() if v != ""}
+
+        with open(os.path.join(tiles_dir, "metadata.json"), "w") as outfile:
+            json.dump(metadata, outfile, sort_keys=True, indent=4, separators=(",", ": "))
+
+        args.format = tiles_ext
+        disk_to_mbtiles(tiles_dir, mbtiles_path, **args.__dict__)
