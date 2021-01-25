@@ -19,6 +19,8 @@ RAD_TO_DEG = 180 / math.pi
 EARTH_RADIUS = 6378137.0
 MERC_MAX_LATITUDE = 85.0511287798065923778
 
+MAPNIK_LONGLAT_PROJ = "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs"
+
 
 class GoogleProjection:
     def __init__(self, levels, tile_size):
@@ -27,6 +29,7 @@ class GoogleProjection:
         self.zc = []
         self.Ac = []
         c = tile_size
+
         for _ in range(0, levels):
             e = c / 2
             self.Bc.append(c / 360.0)
@@ -49,63 +52,54 @@ class GoogleProjection:
         h = RAD_TO_DEG * (2 * math.atan(math.exp(g)) - 0.5 * math.pi)
         return f, h
 
-    def lonlat2merc(self, x, y):
-        dx = min(max(-180.0, x), 180.0)
-        dy = min(max(-MERC_MAX_LATITUDE, y), MERC_MAX_LATITUDE)
-        x = EARTH_RADIUS * math.radians(dx)
-        y = EARTH_RADIUS * math.log(math.tan(math.radians(90 + dy) / 2))
-        return x, y
-
-    def merc2lonlat(self, x, y):
-        rx = min(max(-math.pi, x / EARTH_RADIUS), math.pi)
-        ry = min(max(-math.pi, y / EARTH_RADIUS), math.pi)
-        x = math.degrees(rx)
-        y = math.degrees(2 * math.atan(math.exp(ry)) - math.pi / 2)
-        return x, y
-
 
 class RenderThread:
-    def __init__(self, q, map_file, max_zoom, tile_size, tile_format):
+    def __init__(self, q, map_file, map_prj, max_zoom, tile_size, tile_fmt):
         self.q = q
-        # Create a Map
         self.m = mapnik.Map(tile_size, tile_size)
         self.m.aspect_fix_mode = mapnik.aspect_fix_mode.RESPECT
+
         # Load style XML
         mapnik.load_map(self.m, map_file, True)
+
+        # Obtain <Map> projection
+        self.prj = mapnik.Projection(self.m.srs)
+        self.tr = mapnik.ProjTransform(map_prj, self.prj)
+
         # Projects between tile pixel co-ordinates and LatLong (EPSG:4326)
-        self.tileproj = GoogleProjection(max_zoom + 1, tile_size)
-        self.tilesize = tile_size
-        self.tileformat = tile_format
+        self.tile_proj = GoogleProjection(max_zoom + 1, tile_size)
+        self.tile_size = tile_size
+        self.tile_fmt = tile_fmt
 
     def render_tile(self, tile_uri, x, y, z):
         # Calculate pixel positions of bottom-left & top-right
-        p0 = (x * self.tilesize, (y + 1) * self.tilesize)
-        p1 = ((x + 1) * self.tilesize, y * self.tilesize)
+        p0 = (x * self.tile_size, (y + 1) * self.tile_size)
+        p1 = ((x + 1) * self.tile_size, y * self.tile_size)
+
         # Convert to LatLong (EPSG:4326)
-        l0 = self.tileproj.from_pixel_to_ll(p0, z)
-        l1 = self.tileproj.from_pixel_to_ll(p1, z)
+        l0 = self.tile_proj.from_pixel_to_ll(p0, z)
+        l1 = self.tile_proj.from_pixel_to_ll(p1, z)
 
-        # Convert to map projection (e.g. mercator coordinate system EPSG:900913)
-        # l0 = self.tileproj.lonlat2merc(l0[0], l0[1])
-        # l1 = self.tileproj.lonlat2merc(l1[0], l1[1])
-
-        c0 = mapnik.Coord(l0[0], l0[1])
-        c1 = mapnik.Coord(l1[0], l1[1])
         # Bounding box for the tile
-        bbox = mapnik.Box2d(c0.x, c0.y, c1.x, c1.y)
+        bbox = mapnik.Box2d(l0[0], l0[1], l1[0], l1[1])
+
+        # Convert to map projection (e.g. mercator co-ordinates EPSG:3857)
+        bbox = self.tr.forward(bbox)
+
         self.m.zoom_to_box(bbox)
         if self.m.buffer_size < 128:
             self.m.buffer_size = 128
+
         # Render image with default AGG renderer
-        im = mapnik.Image(self.tilesize, self.tilesize)
+        im = mapnik.Image(self.tile_size, self.tile_size)
         mapnik.render(self.m, im)
 
-        if self.tileformat == "webp":
+        if self.tile_fmt == "webp":
             im.save(tile_uri, "webp:lossless=1:quality=100:image_hint=3")
-        elif self.tileformat == "jpg":
+        elif self.tile_fmt == "jpg":
             im.save(tile_uri, "jpeg100")
         else:
-            im.save(tile_uri, self.tileformat + ":z=9:s=rle")
+            im.save(tile_uri, self.tile_fmt + ":z=9:s=rle")
 
     def loop(self):
         while True:
@@ -134,25 +128,40 @@ class RenderThread:
             self.q.task_done()
 
 
-def render_tiles(map_file, bbox, min_zoom, max_zoom, threads, name, tile_size, tile_format, tile_dir, tile_ext):
+def render_tiles(
+    map_file,
+    map_prj,
+    bbox,
+    min_zoom,
+    max_zoom,
+    threads,
+    name,
+    tile_size,
+    tile_fmt,
+    tile_dir,
+    tile_ext,
+):
     logger.info(
-        "render_tiles(%s, %s, %s, %s, %s, %s, %s, %s, %s %s)",
+        "render_tiles(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s %s)",
         map_file,
+        map_prj,
         bbox,
         min_zoom,
         max_zoom,
         threads,
         name,
         tile_size,
-        tile_format,
+        tile_fmt,
         tile_dir,
         tile_ext,
     )
+
     # Launch rendering threads
     queue = Queue(-1)
     renderers = {}
+
     for i in range(threads):
-        renderer = RenderThread(queue, map_file, max_zoom, tile_size, tile_format)
+        renderer = RenderThread(queue, map_file, map_prj, max_zoom, tile_size, tile_fmt)
         render_thread = threading.Thread(target=renderer.loop)
         render_thread.start()
         logger.info("Started render thread %s", render_thread.getName())
@@ -164,10 +173,12 @@ def render_tiles(map_file, bbox, min_zoom, max_zoom, threads, name, tile_size, t
     gprj = GoogleProjection(max_zoom + 1, tile_size)
     ll0 = (bbox[0], bbox[3])
     ll1 = (bbox[2], bbox[1])
+
     for z in range(min_zoom, max_zoom + 1):
         px0 = gprj.from_ll_to_pixel(ll0, z)
         px1 = gprj.from_ll_to_pixel(ll1, z)
-        # check if we have directories in place
+
+        # Check if we have directories in place
         str_z = "%s" % z
         tile_sizef = float(tile_size)
         if not os.path.isdir(os.path.join(tile_dir, str_z)):
@@ -177,6 +188,7 @@ def render_tiles(map_file, bbox, min_zoom, max_zoom, threads, name, tile_size, t
             # Validate x co-ordinate
             if (x < 0) or (x >= 2 ** z):
                 continue
+
             # Check if we have directories in place
             str_x = "%s" % x
             if not os.path.isdir(os.path.join(tile_dir, str_z, str_x)):
@@ -186,6 +198,7 @@ def render_tiles(map_file, bbox, min_zoom, max_zoom, threads, name, tile_size, t
                 # Validate y co-ordinate
                 if (y < 0) or (y >= 2 ** z):
                     continue
+
                 # Submit tile to be rendered into the queue
                 str_y = "%s" % y
                 tile_uri = os.path.join(tile_dir, str_z, str_x, str_y + "." + tile_ext)
@@ -198,8 +211,10 @@ def render_tiles(map_file, bbox, min_zoom, max_zoom, threads, name, tile_size, t
     # Signal render threads to exit by sending empty request to queue
     for _ in range(threads):
         queue.put(None)
+
     # Wait for pending rendering jobs to complete
     queue.join()
+
     for i in range(threads):
         renderers[i].join()
 
@@ -304,6 +319,7 @@ if __name__ == "__main__":
     tiles_dir = os.path.join(base_dir, "tiles")
     tiles_ext = "png" if args.format.startswith("png") else args.format
     mbtiles_path = args.output
+    prj = mapnik.Projection(MAPNIK_LONGLAT_PROJ)
 
     if os.path.exists(tiles_dir) and os.path.isdir(tiles_dir):
         shutil.rmtree(tiles_dir)
@@ -317,7 +333,17 @@ if __name__ == "__main__":
         args.bbox[3] = min(max(-MERC_MAX_LATITUDE, args.bbox[3]), MERC_MAX_LATITUDE)
 
     render_tiles(
-        args.input, args.bbox, args.min, args.max, args.threads, args.name, args.size, args.format, tiles_dir, tiles_ext
+        args.input,
+        prj,
+        args.bbox,
+        args.min,
+        args.max,
+        args.threads,
+        args.name,
+        args.size,
+        args.format,
+        tiles_dir,
+        tiles_ext,
     )
 
     # Import `tiles` directory into a `MBTiles` file
@@ -330,7 +356,7 @@ if __name__ == "__main__":
         metadata = {
             "name": os.path.splitext(os.path.basename(mbtiles_path))[0],
             "format": tiles_ext,
-            "bounds": str(args.bbox[0]) + ", " + str(args.bbox[1]) + ", " + str(args.bbox[2]) + ", " + str(args.bbox[3]),
+            "bounds": f"{str(args.bbox[0])}, {str(args.bbox[1])}, {str(args.bbox[2])}, {str(args.bbox[3])}",
             "minzoom": str(args.min),
             "maxzoom": str(args.max),
             "attribution": "",
