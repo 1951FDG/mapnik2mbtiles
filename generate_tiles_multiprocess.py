@@ -16,7 +16,6 @@ from mbutil import disk_to_mbtiles
 DEG_TO_RAD = math.pi / 180
 RAD_TO_DEG = 180 / math.pi
 
-EARTH_RADIUS = 6378137.0
 MERC_MAX_LATITUDE = 85.0511287798065923778
 
 MAPNIK_LONGLAT_PROJ = "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs"
